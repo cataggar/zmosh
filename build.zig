@@ -23,7 +23,7 @@ pub fn build(b: *std.Build) void {
     const git_sha = std.mem.trim(u8, b.runAllowFail(
         &.{ "git", "rev-parse", "--short", "HEAD" },
         &code,
-        .Inherit,
+        .inherit,
     ) catch "unknown", "\n");
 
     const options = b.addOptions();
@@ -35,6 +35,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     exe_mod.addOptions("build_options", options);
 
@@ -55,7 +56,6 @@ pub fn build(b: *std.Build) void {
         .name = "zmosh",
         .root_module = exe_mod,
     });
-    exe.linkLibC();
 
     b.installArtifact(exe);
 
@@ -79,7 +79,6 @@ pub fn build(b: *std.Build) void {
         .name = "zmosh",
         .root_module = exe_mod,
     });
-    exe_check.linkLibC();
     // There is no `b.installArtifact(exe_check);` here.
 
     // Finally we add the "check" step which will be detected
@@ -98,6 +97,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = resolved,
             .optimize = .ReleaseSafe,
+            .link_libc = true,
         });
         release_mod.addOptions("build_options", options);
 
@@ -112,7 +112,6 @@ pub fn build(b: *std.Build) void {
             .name = "zmosh",
             .root_module = release_mod,
         });
-        release_exe.linkLibC();
 
         const os_name = @tagName(release_target.os_tag orelse .linux);
         const arch_name = @tagName(release_target.cpu_arch orelse .x86_64);
@@ -127,7 +126,7 @@ pub fn build(b: *std.Build) void {
 
         const shasum = b.addSystemCommand(&.{ "shasum", "-a", "256" });
         shasum.addFileArg(tarball);
-        const shasum_output = shasum.captureStdOut();
+        const shasum_output = shasum.captureStdOut(.{});
 
         const install_tar = b.addInstallFile(tarball, b.fmt("dist/{s}", .{tarball_name}));
         const install_sha = b.addInstallFile(shasum_output, b.fmt("dist/{s}.sha256", .{tarball_name}));

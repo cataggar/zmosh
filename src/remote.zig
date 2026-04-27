@@ -1,5 +1,6 @@
 const std = @import("std");
 const posix = std.posix;
+const compat = @import("compat.zig");
 const crypto = @import("crypto.zig");
 const udp_mod = @import("udp.zig");
 const ipc = @import("ipc.zig");
@@ -10,6 +11,11 @@ const max_ipc_payload = transport.max_payload_len - @sizeOf(ipc.Header);
 const max_stdout_buf = 4 * 1024 * 1024;
 const ack_delay_ns = 20 * std.time.ns_per_ms;
 const resync_cooldown_ns = 250 * std.time.ns_per_ms;
+
+fn getenv(name: [*:0]const u8) ?[:0]const u8 {
+    const val = std.c.getenv(name) orelse return null;
+    return std.mem.span(val);
+}
 
 const c = switch (builtin.os.tag) {
     .macos => @cImport({
@@ -38,7 +44,7 @@ pub const RemoteSession = struct {
 
 /// Parse a ZMX_CONNECT line: "ZMX_CONNECT udp <port> <base64_key>\n"
 pub fn parseConnectLine(line: []const u8) !struct { port: u16, key: crypto.Key } {
-    const trimmed = std.mem.trimRight(u8, line, "\r\n");
+    const trimmed = std.mem.trimEnd(u8, line, "\r\n");
     var it = std.mem.splitScalar(u8, trimmed, ' ');
 
     const prefix = it.next() orelse return error.InvalidConnectLine;
@@ -59,9 +65,9 @@ pub fn parseConnectLine(line: []const u8) !struct { port: u16, key: crypto.Key }
 /// Bootstrap a remote session via SSH: ssh <host> zmosh serve <session>
 /// Prepends common user bin dirs to PATH since SSH non-interactive sessions
 /// often have a minimal PATH that excludes ~/.local/bin, ~/bin, etc.
-pub fn connectRemote(alloc: std.mem.Allocator, host: []const u8, session: []const u8) !RemoteSession {
-    const term = posix.getenv("TERM") orelse "xterm-256color";
-    const colorterm = posix.getenv("COLORTERM");
+pub fn connectRemote(alloc: std.mem.Allocator, io: std.Io, host: []const u8, session: []const u8) !RemoteSession {
+    const term = getenv("TERM") orelse "xterm-256color";
+    const colorterm = getenv("COLORTERM");
     const remote_cmd = if (colorterm) |ct|
         try std.fmt.allocPrint(
             alloc,
@@ -76,19 +82,20 @@ pub fn connectRemote(alloc: std.mem.Allocator, host: []const u8, session: []cons
         );
     defer alloc.free(remote_cmd);
     const argv = [_][]const u8{ "ssh", host, "--", remote_cmd };
-    var child = std.process.Child.init(&argv, alloc);
-    child.stdin_behavior = .Pipe;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Inherit;
-    try child.spawn();
+    var child = try std.process.spawn(io, .{
+        .argv = &argv,
+        .stdin = .pipe,
+        .stdout = .pipe,
+        .stderr = .inherit,
+    });
 
     // Read stdout looking for ZMX_CONNECT line
-    const stdout = child.stdout.?;
+    const stdout_fd = child.stdout.?.handle;
     var buf: [512]u8 = undefined;
     var total: usize = 0;
 
     while (total < buf.len) {
-        const n = stdout.read(buf[total..]) catch |err| {
+        const n = posix.read(stdout_fd, buf[total..]) catch |err| {
             log.err("failed to read SSH stdout: {s}", .{@errorName(err)});
             return error.SshReadFailed;
         };
@@ -96,17 +103,17 @@ pub fn connectRemote(alloc: std.mem.Allocator, host: []const u8, session: []cons
         total += n;
 
         // Check if we have a complete line
-        if (std.mem.indexOf(u8, buf[0..total], "\n")) |_| break;
+        if (std.mem.find(u8, buf[0..total], "\n")) |_| break;
     }
 
     if (total == 0) {
-        _ = child.wait() catch {};
+        _ = child.wait(io) catch {};
         return error.SshNoOutput;
     }
 
     const result = parseConnectLine(buf[0..total]) catch |err| {
         log.err("failed to parse connect line: {s}", .{@errorName(err)});
-        _ = child.wait() catch {};
+        _ = child.wait(io) catch {};
         return error.InvalidConnectLine;
     };
 
@@ -114,11 +121,11 @@ pub fn connectRemote(alloc: std.mem.Allocator, host: []const u8, session: []cons
     // Don't wait for SSH to exit: the remote gateway runs indefinitely.
     // SSH will be killed when we exit or will linger harmlessly.
     if (child.stdin) |f| {
-        f.close();
+        compat.close(f.handle);
         child.stdin = null;
     }
     if (child.stdout) |f| {
-        f.close();
+        compat.close(f.handle);
         child.stdout = null;
     }
 
@@ -131,7 +138,7 @@ pub fn connectRemote(alloc: std.mem.Allocator, host: []const u8, session: []cons
 
 var sigwinch_received: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
-fn handleSigwinch(_: i32, _: *const posix.siginfo_t, _: ?*anyopaque) callconv(.c) void {
+fn handleSigwinch(_: posix.SIG, _: *const posix.siginfo_t, _: ?*anyopaque) callconv(.c) void {
     sigwinch_received.store(true, .release);
 }
 
@@ -154,8 +161,8 @@ fn getTerminalSize() ipc.Resize {
 
 /// Detects Kitty keyboard protocol escape sequence for Ctrl+\
 fn isKittyCtrlBackslash(buf: []const u8) bool {
-    return std.mem.indexOf(u8, buf, "\x1b[92;5u") != null or
-        std.mem.indexOf(u8, buf, "\x1b[92;5:1u") != null;
+    return std.mem.find(u8, buf, "\x1b[92;5u") != null or
+        std.mem.find(u8, buf, "\x1b[92;5:1u") != null;
 }
 
 fn sendHeartbeat(
@@ -247,15 +254,12 @@ fn requestResync(
 /// Remote attach: connect to a remote zmx session via UDP.
 pub fn remoteAttach(alloc: std.mem.Allocator, session: RemoteSession) !void {
     // Resolve host address — try numeric IP first, fall back to DNS
-    const addr = std.net.Address.resolveIp(session.host, session.port) catch blk: {
-        const list = try std.net.getAddressList(alloc, session.host, session.port);
-        defer list.deinit();
-        if (list.addrs.len == 0) return error.HostNotFound;
-        break :blk list.addrs[0];
+    const addr = compat.Address.resolveIp(session.host, session.port) catch blk: {
+        break :blk try compat.Address.resolve(session.host, session.port);
     };
 
     // Create UDP socket — bind ephemeral port (OS picks)
-    const sock_fd = try posix.socket(
+    const sock_fd = try compat.socket(
         addr.any.family,
         posix.SOCK.DGRAM | posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC,
         0,
@@ -283,7 +287,7 @@ pub fn remoteAttach(alloc: std.mem.Allocator, session: RemoteSession) !void {
             // return to legacy encoding in the user's outer shell.
             "\x1b[<u" ++
             "\x1b[?25h";
-        _ = posix.write(posix.STDOUT_FILENO, restore_seq) catch {};
+        _ = compat.write(posix.STDOUT_FILENO, restore_seq) catch {};
     }
 
     var raw_termios = orig_termios;
@@ -296,13 +300,13 @@ pub fn remoteAttach(alloc: std.mem.Allocator, session: RemoteSession) !void {
 
     // Clear screen before attaching. We do NOT use the alternate screen
     // (\x1b[?1049h) because it has no scrollback buffer.
-    _ = try posix.write(posix.STDOUT_FILENO, "\x1b[2J\x1b[H");
+    _ = try compat.write(posix.STDOUT_FILENO, "\x1b[2J\x1b[H");
 
     setupSigwinchHandler();
 
     // Make stdin non-blocking
-    const stdin_flags = try posix.fcntl(posix.STDIN_FILENO, posix.F.GETFL, 0);
-    _ = try posix.fcntl(posix.STDIN_FILENO, posix.F.SETFL, stdin_flags | posix.SOCK.NONBLOCK);
+    const stdin_flags = try compat.fcntl(posix.STDIN_FILENO, posix.F.GETFL, 0);
+    _ = try compat.fcntl(posix.STDIN_FILENO, posix.F.SETFL, stdin_flags | posix.SOCK.NONBLOCK);
 
     const config = udp_mod.Config{};
     var stdout_buf = try std.ArrayList(u8).initCapacity(alloc, 4096);
@@ -310,7 +314,7 @@ pub fn remoteAttach(alloc: std.mem.Allocator, session: RemoteSession) !void {
     var was_disconnected = false;
     var session_ended = false;
 
-    var last_ack_send_ns: i64 = @intCast(std.time.nanoTimestamp());
+    var last_ack_send_ns: i64 = @intCast(compat.nanoTimestamp());
     var ack_dirty = false;
     var last_resync_request_ns: i64 = 0;
 
@@ -321,7 +325,7 @@ pub fn remoteAttach(alloc: std.mem.Allocator, session: RemoteSession) !void {
     try sendReliablePayload(&peer, &udp_sock, &reliable_send, &reliable_recv, .reliable_ipc, init_ipc, last_ack_send_ns);
 
     while (true) {
-        const now: i64 = @intCast(std.time.nanoTimestamp());
+        const now: i64 = @intCast(compat.nanoTimestamp());
 
         // Check SIGWINCH
         if (sigwinch_received.swap(false, .acq_rel)) {
@@ -346,14 +350,14 @@ pub fn remoteAttach(alloc: std.mem.Allocator, session: RemoteSession) !void {
         // State check
         const state = peer.updateState(now, config);
         if (state == .dead) {
-            _ = posix.write(posix.STDOUT_FILENO, "\r\nzmx: connection lost permanently\r\n") catch {};
+            _ = compat.write(posix.STDOUT_FILENO, "\r\nzmx: connection lost permanently\r\n") catch {};
             return;
         }
         if (state == .disconnected and !was_disconnected) {
-            _ = posix.write(posix.STDOUT_FILENO, "\x1b7\x1b[999;1H\x1b[2K\x1b[7mzmx: connection lost — waiting to reconnect...\x1b[27m\x1b8") catch {};
+            _ = compat.write(posix.STDOUT_FILENO, "\x1b7\x1b[999;1H\x1b[2K\x1b[7mzmx: connection lost — waiting to reconnect...\x1b[27m\x1b8") catch {};
             was_disconnected = true;
         } else if (state == .connected and was_disconnected) {
-            _ = posix.write(posix.STDOUT_FILENO, "\x1b7\x1b[999;1H\x1b[2K\x1b8") catch {};
+            _ = compat.write(posix.STDOUT_FILENO, "\x1b7\x1b[999;1H\x1b[2K\x1b8") catch {};
             was_disconnected = false;
         }
 
@@ -466,7 +470,7 @@ pub fn remoteAttach(alloc: std.mem.Allocator, session: RemoteSession) !void {
         // Flush stdout
         if (poll_count == 3 and poll_fds[2].revents & posix.POLL.OUT != 0) {
             if (stdout_buf.items.len > 0) {
-                const written = posix.write(posix.STDOUT_FILENO, stdout_buf.items) catch |err| blk: {
+                const written = compat.write(posix.STDOUT_FILENO, stdout_buf.items) catch |err| blk: {
                     if (err == error.WouldBlock) break :blk 0;
                     return err;
                 };
@@ -478,9 +482,9 @@ pub fn remoteAttach(alloc: std.mem.Allocator, session: RemoteSession) !void {
 
         if (session_ended) {
             if (stdout_buf.items.len > 0) {
-                _ = posix.write(posix.STDOUT_FILENO, stdout_buf.items) catch {};
+                _ = compat.write(posix.STDOUT_FILENO, stdout_buf.items) catch {};
             }
-            _ = posix.write(posix.STDOUT_FILENO, "\r\nzmx: remote session ended\r\n") catch {};
+            _ = compat.write(posix.STDOUT_FILENO, "\r\nzmx: remote session ended\r\n") catch {};
             return;
         }
     }

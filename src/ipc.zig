@@ -1,5 +1,6 @@
 const std = @import("std");
 const posix = std.posix;
+const compat = @import("compat.zig");
 
 pub const Tag = enum(u8) {
     Input = 0,
@@ -73,7 +74,7 @@ pub fn appendMessage(alloc: std.mem.Allocator, list: *std.ArrayList(u8), tag: Ta
 fn writeAll(fd: i32, data: []const u8) !void {
     var index: usize = 0;
     while (index < data.len) {
-        const n = try posix.write(fd, data[index..]);
+        const n = try compat.write(fd, data[index..]);
         if (n == 0) return error.DiskQuota;
         index += n;
     }

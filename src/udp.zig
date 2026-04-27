@@ -1,12 +1,13 @@
 const std = @import("std");
 const posix = std.posix;
+const compat = @import("compat.zig");
 const crypto = @import("crypto.zig");
 
 const log = std.log.scoped(.udp);
 
 /// Truncate nanoTimestamp (i128) to i64 for storage. Sufficient for ~292 years.
 fn nanoNow() i64 {
-    return @intCast(std.time.nanoTimestamp());
+    return @intCast(compat.nanoTimestamp());
 }
 
 pub const Config = struct {
@@ -36,7 +37,7 @@ pub const UdpSocket = struct {
     }
 
     fn bindFamily(family: u32, port_start: u16, port_end: u16, set_v6only: bool) ?UdpSocket {
-        const fd = posix.socket(
+        const fd = compat.socket(
             family,
             posix.SOCK.DGRAM | posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC,
             0,
@@ -44,8 +45,8 @@ pub const UdpSocket = struct {
 
         if (set_v6only) {
             const v6only: i32 = 0;
-            posix.setsockopt(fd, posix.IPPROTO.IPV6, std.os.linux.IPV6.V6ONLY, std.mem.asBytes(&v6only)) catch {
-                posix.close(fd);
+            compat.setsockopt(fd, posix.IPPROTO.IPV6, std.os.linux.IPV6.V6ONLY, std.mem.asBytes(&v6only)) catch {
+                compat.close(fd);
                 return null;
             };
         }
@@ -53,10 +54,10 @@ pub const UdpSocket = struct {
         var port = port_start;
         while (port < port_end) : (port += 1) {
             const addr = if (family == posix.AF.INET6)
-                std.net.Address.initIp6(.{0} ** 16, port, 0, 0)
+                compat.Address.initIp6(.{0} ** 16, port, 0, 0)
             else
-                std.net.Address.initIp4(.{0} ** 4, port);
-            posix.bind(fd, &addr.any, addr.getOsSockLen()) catch continue;
+                compat.Address.initIp4(.{0} ** 4, port);
+            compat.bind(fd, &addr.any, addr.getOsSockLen()) catch continue;
             log.info("bound udp port={d} family={s}", .{
                 port,
                 if (family == posix.AF.INET6) "inet6" else "inet",
@@ -64,7 +65,7 @@ pub const UdpSocket = struct {
             return .{ .fd = fd, .bound_port = port };
         }
 
-        posix.close(fd);
+        compat.close(fd);
         return null;
     }
 
@@ -72,24 +73,24 @@ pub const UdpSocket = struct {
         return self.fd;
     }
 
-    pub fn sendTo(self: *UdpSocket, data: []const u8, addr: std.net.Address) !void {
-        _ = posix.sendto(self.fd, data, 0, &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
+    pub fn sendTo(self: *UdpSocket, data: []const u8, addr: compat.Address) !void {
+        _ = compat.sendto(self.fd, data, 0, &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
             error.WouldBlock => return error.WouldBlock,
             else => return err,
         };
     }
 
-    pub fn recvFrom(self: *UdpSocket, buf: []u8) !struct { len: usize, addr: std.net.Address } {
+    pub fn recvFrom(self: *UdpSocket, buf: []u8) !struct { len: usize, addr: compat.Address } {
         var src_addr: posix.sockaddr.storage = undefined;
         var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr.storage);
-        const n = posix.recvfrom(self.fd, buf, 0, @ptrCast(&src_addr), &addr_len) catch |err| switch (err) {
+        const n = compat.recvfrom(self.fd, buf, 0, @ptrCast(&src_addr), &addr_len) catch |err| switch (err) {
             error.WouldBlock => return error.WouldBlock,
             else => return err,
         };
         // Copy the full address returned by the kernel — not just the first
         // sizeof(sockaddr) bytes — so IPv6 addresses (28 bytes) aren't truncated.
-        var addr: std.net.Address = std.mem.zeroes(std.net.Address);
-        const len = @min(@as(usize, @intCast(addr_len)), @sizeOf(std.net.Address));
+        var addr: compat.Address = std.mem.zeroes(compat.Address);
+        const len = @min(@as(usize, @intCast(addr_len)), @sizeOf(compat.Address));
         @memcpy(
             std.mem.asBytes(&addr)[0..len],
             std.mem.asBytes(&src_addr)[0..len],
@@ -101,12 +102,12 @@ pub const UdpSocket = struct {
     }
 
     pub fn close(self: *UdpSocket) void {
-        posix.close(self.fd);
+        compat.close(self.fd);
     }
 };
 
 pub const Peer = struct {
-    addr: ?std.net.Address,
+    addr: ?compat.Address,
     key: crypto.Key,
 
     // Sequence numbers
@@ -168,7 +169,7 @@ pub const Peer = struct {
 
     /// Try to receive and decrypt a datagram. Updates peer address on success (roaming).
     /// Returns null if no data available (EAGAIN) or decryption fails.
-    pub fn recv(self: *Peer, sock: *UdpSocket, buf: []u8) !?struct { data: []u8, from: std.net.Address } {
+    pub fn recv(self: *Peer, sock: *UdpSocket, buf: []u8) !?struct { data: []u8, from: compat.Address } {
         var raw: [9000]u8 = undefined;
         const result = sock.recvFrom(&raw) catch |err| switch (err) {
             error.WouldBlock => return null,
@@ -280,15 +281,15 @@ pub const Peer = struct {
 
 /// Bind a non-blocking IPv4-only UDP socket on loopback for testing.
 fn testBindIp4(port_start: u16, port_end: u16) !UdpSocket {
-    const fd = try posix.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC, 0);
-    errdefer posix.close(fd);
+    const fd = try compat.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC, 0);
+    errdefer compat.close(fd);
     var port = port_start;
     while (port < port_end) : (port += 1) {
-        const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
-        posix.bind(fd, &addr.any, addr.getOsSockLen()) catch continue;
+        const addr = compat.Address.initIp4(.{ 127, 0, 0, 1 }, port);
+        compat.bind(fd, &addr.any, addr.getOsSockLen()) catch continue;
         return .{ .fd = fd, .bound_port = port };
     }
-    posix.close(fd);
+    compat.close(fd);
     return error.AddressInUse;
 }
 
@@ -322,7 +323,7 @@ test "Peer send/recv round-trip (loopback)" {
     const msg = "hello, server!";
     var enc_buf: [crypto.overhead + msg.len]u8 = undefined;
     const datagram = try crypto.encodeDatagram(key, .to_server, 0, msg, &enc_buf);
-    try client_sock.sendTo(datagram, std.net.Address.initIp4(.{ 127, 0, 0, 1 }, server_sock.bound_port));
+    try client_sock.sendTo(datagram, compat.Address.initIp4(.{ 127, 0, 0, 1 }, server_sock.bound_port));
 
     try testPollReady(server_sock.fd);
     var peer_buf: [4096]u8 = undefined;
@@ -340,7 +341,7 @@ test "Anti-replay: reject datagram with seq <= max_recv_seq" {
     var sock_send = try testBindIp4(60940, 60950);
     defer sock_send.close();
 
-    const target = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, sock_recv.bound_port);
+    const target = compat.Address.initIp4(.{ 127, 0, 0, 1 }, sock_recv.bound_port);
 
     var buf_lo: [128]u8 = undefined;
     const pkt_lo = try crypto.encodeDatagram(key, .to_server, 5, "first", &buf_lo);
@@ -379,7 +380,7 @@ test "Roaming: verify addr updates on authentic packet" {
     var sock_b = try testBindIp4(60970, 60980);
     defer sock_b.close();
 
-    const target = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, sock_recv.bound_port);
+    const target = compat.Address.initIp4(.{ 127, 0, 0, 1 }, sock_recv.bound_port);
 
     var buf1: [128]u8 = undefined;
     try sock_a.sendTo(try crypto.encodeDatagram(key, .to_server, 1, "from_a", &buf1), target);

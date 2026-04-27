@@ -231,7 +231,10 @@ pub fn parsePacket(data: []const u8) !Packet {
     if (data[0] != version) return error.UnsupportedVersion;
 
     const channel_int = data[1];
-    const channel = std.meta.intToEnum(Channel, channel_int) catch return error.InvalidChannel;
+    const channel: Channel = switch (channel_int) {
+        0, 1, 2, 3 => @enumFromInt(channel_int),
+        else => return error.InvalidChannel,
+    };
 
     const seq = std.mem.readInt(u32, data[4..8], .big);
     const ack = std.mem.readInt(u32, data[8..12], .big);
@@ -274,7 +277,10 @@ pub fn buildControl(control: Control, out: *[8]u8) []const u8 {
 
 pub fn parseControl(payload: []const u8) !Control {
     if (payload.len < 1) return error.InvalidControl;
-    return std.meta.intToEnum(Control, payload[0]) catch error.InvalidControl;
+    return switch (payload[0]) {
+        1 => .resync_request,
+        else => return error.InvalidControl,
+    };
 }
 
 pub fn buildIpcBytes(tag: ipc.Tag, payload: []const u8, buf: []u8) []const u8 {

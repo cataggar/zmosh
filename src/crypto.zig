@@ -24,7 +24,7 @@ pub const overhead = 8 + tag_length;
 
 pub fn generateKey() Key {
     var key: Key = undefined;
-    std.crypto.random.bytes(&key);
+    std.c.arc4random_buf(&key, key.len);
     return key;
 }
 

@@ -182,9 +182,24 @@ pub fn write(fd: posix.fd_t, bytes: []const u8) WriteError!usize {
 }
 
 pub fn socket(domain: u32, sock_type: u32, protocol: u32) !posix.fd_t {
-    const rc = std.c.socket(@intCast(domain), @intCast(sock_type), @intCast(protocol));
-    if (rc >= 0) return rc;
-    return error.Unexpected;
+    // On macOS, SOCK_NONBLOCK and SOCK_CLOEXEC are not valid flags for
+    // socket(). Strip them and apply via fcntl after creation.
+    const nonblock_bits: u32 = posix.SOCK.NONBLOCK;
+    const cloexec_bits: u32 = posix.SOCK.CLOEXEC;
+    const clean_type = sock_type & ~(nonblock_bits | cloexec_bits);
+    const rc = std.c.socket(@intCast(domain), @intCast(clean_type), @intCast(protocol));
+    if (rc < 0) return error.Unexpected;
+
+    if (sock_type & nonblock_bits != 0) {
+        const flags = std.c.fcntl(rc, std.c.F.GETFL);
+        _ = std.c.fcntl(rc, std.c.F.SETFL, flags | @as(c_int, 0x0004)); // O_NONBLOCK
+    }
+    if (sock_type & cloexec_bits != 0) {
+        const flags = std.c.fcntl(rc, std.c.F.GETFD);
+        _ = std.c.fcntl(rc, std.c.F.SETFD, flags | 1); // FD_CLOEXEC
+    }
+
+    return rc;
 }
 
 pub const ConnectError = error{

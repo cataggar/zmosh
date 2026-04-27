@@ -181,6 +181,9 @@ pub fn write(fd: posix.fd_t, bytes: []const u8) WriteError!usize {
     };
 }
 
+/// Platform-correct O_NONBLOCK for use with fcntl(F_SETFL).
+pub const O_NONBLOCK: u32 = @bitCast(c.O{ .NONBLOCK = true });
+
 pub fn socket(domain: u32, sock_type: u32, protocol: u32) !posix.fd_t {
     // On macOS, SOCK_NONBLOCK and SOCK_CLOEXEC are not valid flags for
     // socket(). Strip them and apply via fcntl after creation.
@@ -192,11 +195,11 @@ pub fn socket(domain: u32, sock_type: u32, protocol: u32) !posix.fd_t {
 
     if (sock_type & nonblock_bits != 0) {
         const flags = std.c.fcntl(rc, std.c.F.GETFL);
-        _ = std.c.fcntl(rc, std.c.F.SETFL, flags | @as(c_int, 0x0004)); // O_NONBLOCK
+        _ = std.c.fcntl(rc, std.c.F.SETFL, flags | @as(c_int, @intCast(O_NONBLOCK)));
     }
     if (sock_type & cloexec_bits != 0) {
         const flags = std.c.fcntl(rc, std.c.F.GETFD);
-        _ = std.c.fcntl(rc, std.c.F.SETFD, flags | 1); // FD_CLOEXEC
+        _ = std.c.fcntl(rc, std.c.F.SETFD, flags | posix.FD_CLOEXEC);
     }
 
     return rc;

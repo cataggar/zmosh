@@ -53,7 +53,7 @@ fn connectUnix(path: []const u8) !i32 {
     try compat.connect(fd, unix_addr.sockaddr(), unix_addr.socklen());
     // Make non-blocking for poll loop
     const flags = try compat.fcntl(fd, posix.F.GETFL, 0);
-    _ = try compat.fcntl(fd, posix.F.SETFL, flags | posix.SOCK.NONBLOCK);
+    _ = try compat.fcntl(fd, posix.F.SETFL, flags | compat.O_NONBLOCK);
     return fd;
 }
 

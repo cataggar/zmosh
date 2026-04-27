@@ -1147,7 +1147,7 @@ fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
 
     // Make socket non-blocking to avoid blocking on writes
     const sock_flags = try compat.fcntl(client_sock_fd, posix.F.GETFL, 0);
-    _ = try compat.fcntl(client_sock_fd, posix.F.SETFL, sock_flags | posix.SOCK.NONBLOCK);
+    _ = try compat.fcntl(client_sock_fd, posix.F.SETFL, sock_flags | compat.O_NONBLOCK);
 
     // Buffer for outgoing socket writes
     var sock_write_buf = try std.ArrayList(u8).initCapacity(alloc, 4096);
@@ -1170,7 +1170,7 @@ fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
 
     // Make stdin non-blocking
     const flags = try compat.fcntl(stdin_fd, posix.F.GETFL, 0);
-    _ = try compat.fcntl(stdin_fd, posix.F.SETFL, flags | posix.SOCK.NONBLOCK);
+    _ = try compat.fcntl(stdin_fd, posix.F.SETFL, flags | compat.O_NONBLOCK);
 
     while (true) {
         // Check for pending SIGWINCH
@@ -1576,7 +1576,7 @@ fn spawnPty(daemon: *Daemon) !c_int {
 
     // make pty non-blocking
     const flags = try compat.fcntl(master_fd, posix.F.GETFL, 0);
-    _ = try compat.fcntl(master_fd, posix.F.SETFL, flags | @as(u32, 0o4000));
+    _ = try compat.fcntl(master_fd, posix.F.SETFL, flags | compat.O_NONBLOCK);
     return master_fd;
 }
 

@@ -317,7 +317,7 @@ pub fn remoteAttach(alloc: std.mem.Allocator, session: RemoteSession) !void {
 
     // Make stdin non-blocking
     const stdin_flags = try compat.fcntl(posix.STDIN_FILENO, posix.F.GETFL, 0);
-    _ = try compat.fcntl(posix.STDIN_FILENO, posix.F.SETFL, stdin_flags | posix.SOCK.NONBLOCK);
+    _ = try compat.fcntl(posix.STDIN_FILENO, posix.F.SETFL, stdin_flags | compat.O_NONBLOCK);
 
     const config = udp_mod.Config{};
     var stdout_buf = try std.ArrayList(u8).initCapacity(alloc, 4096);

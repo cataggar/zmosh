@@ -129,8 +129,14 @@ pub fn connectRemote(alloc: std.mem.Allocator, io: std.Io, host: []const u8, ses
         child.stdout = null;
     }
 
+    // Strip user@ prefix — SSH needs it but UDP resolution doesn't.
+    const bare_host = if (std.mem.indexOf(u8, host, "@")) |at|
+        host[at + 1 ..]
+    else
+        host;
+
     return .{
-        .host = host,
+        .host = bare_host,
         .port = result.port,
         .key = result.key,
     };
@@ -254,8 +260,13 @@ fn requestResync(
 /// Remote attach: connect to a remote zmx session via UDP.
 pub fn remoteAttach(alloc: std.mem.Allocator, session: RemoteSession) !void {
     // Resolve host address — try numeric IP first, fall back to DNS
-    const addr = compat.Address.resolveIp(session.host, session.port) catch blk: {
-        break :blk try compat.Address.resolve(session.host, session.port);
+    log.info("resolving host='{s}' port={d}", .{ session.host, session.port });
+    const addr = compat.Address.resolveIp(session.host, session.port) catch |err1| blk: {
+        log.warn("resolveIp failed: {s}, trying DNS", .{@errorName(err1)});
+        break :blk compat.Address.resolve(session.host, session.port) catch |err2| {
+            log.err("DNS resolve also failed: {s}", .{@errorName(err2)});
+            return err2;
+        };
     };
 
     // Create UDP socket — bind ephemeral port (OS picks)

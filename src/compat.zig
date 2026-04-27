@@ -57,7 +57,6 @@ pub const Address = extern union {
 
         var hints: c.addrinfo = std.mem.zeroes(c.addrinfo);
         hints.flags = .{ .NUMERICHOST = true };
-        hints.socktype = c.SOCK.DGRAM;
 
         var result: ?*c.addrinfo = null;
         const rc = c.getaddrinfo(host_z, null, &hints, &result);
@@ -76,7 +75,6 @@ pub const Address = extern union {
         const host_z: [*:0]const u8 = buf[0..host.len :0];
 
         var hints: c.addrinfo = std.mem.zeroes(c.addrinfo);
-        hints.socktype = c.SOCK.DGRAM;
 
         var result: ?*c.addrinfo = null;
         const rc = c.getaddrinfo(host_z, null, &hints, &result);

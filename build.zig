@@ -46,6 +46,13 @@ pub fn build(b: *std.Build) void {
         dep.module("ghostty-vt"),
     );
 
+    _ = b.addModule("zmx-ipc", .{
+        .root_source_file = b.path("src/ipc.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
     // Run
     {
         const run_step = b.step("run", "Run the app");
